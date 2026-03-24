@@ -9,7 +9,6 @@ from difflib import SequenceMatcher
 from supabase import create_client
 
 # --- 1. CONFIGURACIÓN DE CONEXIÓN (PRODUCCIÓN) ---
-# Asegúrate de configurar estos en Settings > Secrets en Streamlit Cloud
 try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
@@ -70,11 +69,8 @@ def limpiar_nombre_busqueda(nombre):
 
 @st.cache_data
 def cargar_datos():
-    # Carga desde Supabase en lugar de CSV local
     res_p = supabase.table("precenso_pendientes").select("*").execute()
     df_p = pd.DataFrame(res_p.data)
-    
-    # Normalizar nombres de columnas a minúsculas por compatibilidad con Postgres
     df_p.columns = df_p.columns.str.lower()
     
     # Lógica de ID y coordenadas
@@ -180,9 +176,12 @@ with col_audit:
             st.info(f"**Establecimiento:** {local['nombre_comercial']}\n\n**Dir:** {local['direccion_comercial']}")
         
         with c_foto:
-            # En producción se manejará mediante URLs de Supabase Storage más adelante
-            st.warning("🖼️ Foto (Versión Nube)")
-            st.caption(f"ID Foto: {local.get('nombre_foto', 'N/A')}")
+            foto_id = str(local.get('nombre_foto', '')).strip()
+            if foto_id and foto_id.lower() not in ['nan', 'none', '', '0']:
+                url_foto = f"{st.secrets['SUPABASE_URL']}/storage/v1/object/public/fotos_censo/{foto_id}"
+                st.image(url_foto, use_container_width=True, caption=f"ID: {foto_id}")
+            else:
+                st.warning("⚪ Sin foto disponible")
 
         if st.session_state['temp_vinc'] is None:
             st.markdown('<div class="section-header">🏢 OPCIONES CÁMARA DE COMERCIO</div>', unsafe_allow_html=True)
@@ -248,11 +247,37 @@ with col_audit:
                 })
                 st.table(resumen)
                 cf1, cf2 = st.columns(2)
+                
                 if cf1.button("🚀 MIGRAR A CAMPO", type="primary", use_container_width=True):
-                    st.session_state['base_campo'].append({"id_encuesta": local['id_int'], "data": vinc})
-                    st.session_state['seleccion_id'] = None
-                    st.session_state['temp_vinc'] = None
-                    st.rerun()
+                    datos_a_insertar = {
+                        "id_encuesta": local['id_int'],
+                        "tipo_documento": vinc['padre'].get('tipo_identificacion'),
+                        "numero_documento": vinc['padre'].get('numero_identificacion'),
+                        "razon_social": vinc['padre'].get('razon_social'),
+                        "nombre_comercial": local['nombre_comercial'],
+                        "direccion_completa": vinc['hijo'].get('direccion_comercial'),
+                        "tipo_contribuyente": vinc['padre'].get('org_juridica'),
+                        "act_economica_primaria": ciiu_final,
+                        "correo_electronico": vinc['padre'].get('correo_comercial'),
+                        "telefono_principal": vinc['padre'].get('telefono'),
+                        "usuario_encuestador": "WEB_ADMIN",
+                        "x": local['lon'],
+                        "y": local['lat'],
+                        "creator": "WEB_ADMIN",
+                        "editor": "WEB_ADMIN"
+                    }
+
+                    try:
+                        response = supabase.table("campo_censo").insert(datos_a_insertar).execute()
+                        if response.data:
+                            st.success("✅ ¡Registro migrado exitosamente!")
+                            st.session_state['base_campo'].append({"id_encuesta": local['id_int'], "data": vinc})
+                            st.session_state['seleccion_id'] = None
+                            st.session_state['temp_vinc'] = None
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error al migrar: {e}")
+
                 if cf2.button("❌ Cancelar", use_container_width=True):
                     st.session_state['temp_vinc'] = None
                     st.rerun()
