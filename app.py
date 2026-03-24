@@ -40,7 +40,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Memoria de la aplicación
+# Memoria de la aplicación (Sesión actual)
 if 'base_campo' not in st.session_state: st.session_state['base_campo'] = []
 if 'no_vinculados' not in st.session_state: st.session_state['no_vinculados'] = set()
 if 'seleccion_id' not in st.session_state: st.session_state['seleccion_id'] = None
@@ -69,20 +69,24 @@ def limpiar_nombre_busqueda(nombre):
 
 @st.cache_data
 def cargar_datos():
+    # 1. Precenso
     res_p = supabase.table("precenso_pendientes").select("*").execute()
     df_p = pd.DataFrame(res_p.data)
     df_p.columns = df_p.columns.str.lower()
-    
-    # Lógica de ID y coordenadas
     df_p['id_int'] = range(len(df_p))
     df_p['lon'] = df_p['x'].apply(corregir_coordenada)
     df_p['lat'] = df_p['y'].apply(corregir_coordenada)
     
+    # 2. Cámara de Comercio
     res_c = supabase.table("camara_comercio").select("*").execute()
     df_c = pd.DataFrame(res_c.data)
     df_c.columns = df_c.columns.str.lower()
     
-    return df_p, df_c
+    # 3. Datos ya registrados en campo (Persistencia)
+    res_campo = supabase.table("campo_censo").select("id_encuesta, tipo_encuesta").execute()
+    df_campo_db = pd.DataFrame(res_campo.data)
+    
+    return df_p, df_c, df_campo_db
 
 def buscar_propietario_legal(hijo, df_full):
     nit_hijo = str(hijo.get('numero_identificacion', '')).strip()
@@ -104,7 +108,18 @@ def buscar_propietario_legal(hijo, df_full):
     if not res.empty: return res.iloc[0].to_dict(), "Llave 4 (Dir+Mail)"
     return None, "No encontrado"
 
-df_pre, df_cc = cargar_datos()
+# Carga inicial de datos
+df_pre, df_cc, df_campo_registrado = cargar_datos()
+
+# --- RECONSTRUCCIÓN DE ESTADOS DESDE LA BASE DE DATOS ---
+if not df_campo_registrado.empty:
+    ids_v_db = df_campo_registrado[df_campo_registrado['tipo_encuesta'] != 'NO VINCULADO']['id_encuesta'].tolist()
+    ids_nv_db = df_campo_registrado[df_campo_registrado['tipo_encuesta'] == 'NO VINCULADO']['id_encuesta'].tolist()
+else:
+    ids_v_db, ids_nv_db = [], []
+
+v_ids = list(set(ids_v_db + [r['id_encuesta'] for r in st.session_state['base_campo']]))
+nv_ids = list(set(ids_nv_db + list(st.session_state['no_vinculados'])))
 
 # --- 4. HEADER Y ESTADÍSTICAS ---
 st.write("") 
@@ -116,9 +131,6 @@ with col_t2:
     if st.button("🔄 Actualizar Datos", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-
-v_ids = [r['id_encuesta'] for r in st.session_state['base_campo']]
-nv_ids = list(st.session_state['no_vinculados'])
 
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Total Cámara", f"{len(df_cc):,}")
@@ -227,42 +239,37 @@ with col_audit:
                 st.rerun()
         else:
             if st.session_state['temp_vinc'] == 'CANCELAR_NO':
-                        st.error("### ¿Confirmar No Encontrado?")
-                        st.write("El establecimiento se marcará para levantamiento total en campo.")
-                        c1, c2 = st.columns(2)
-                        
-                        if c1.button("✅ SÍ, REGISTRAR PENDIENTE", use_container_width=True):
-                            # Preparamos los datos para la base de datos de campo
-                            # Estos son los registros que la App Móvil deberá capturar desde cero
-                            datos_no_vinc = {
-                                "id_encuesta": int(local['id_int']),
-                                "nombre_comercial": local['nombre_comercial'],
-                                "direccion_completa": local['direccion_comercial'],
-                                "estado_encuesta": "SIN REVISAR",
-                                "tipo_encuesta": "NO VINCULADO", # Identificador clave para la App Móvil
-                                "x": float(local['lon']) if pd.notna(local['lon']) else None,
-                                "y": float(local['lat']) if pd.notna(local['lat']) else None,
-                                "usuario_encuestador": "WEB_ADMIN",
-                                "creator": "WEB_ADMIN"
-                            }
-            
-                            try:
-                                # Insertar en la tabla de Supabase
-                                response = supabase.table("campo_censo").insert(datos_no_vinc).execute()
-                                
-                                if response.data:
-                                    st.warning("⚠️ Registrado en la base de datos como NO VINCULADO.")
-                                    # Actualizamos la memoria local para que el punto cambie de color en el mapa
-                                    st.session_state['no_vinculados'].add(st.session_state['seleccion_id'])
-                                    st.session_state['seleccion_id'] = None
-                                    st.session_state['temp_vinc'] = None
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Error al guardar no vinculado: {e}")
-            
-                        if c2.button("❌ VOLVER A BUSCAR", use_container_width=True):
+                st.error("### ¿Confirmar No Encontrado?")
+                st.write("El establecimiento se marcará para levantamiento total en campo.")
+                c1, c2 = st.columns(2)
+                
+                if c1.button("✅ SÍ, REGISTRAR PENDIENTE", use_container_width=True):
+                    datos_no_vinc = {
+                        "id_encuesta": int(local['id_int']),
+                        "nombre_comercial": local['nombre_comercial'],
+                        "direccion_completa": local['direccion_comercial'],
+                        "estado_encuesta": "SIN REVISAR",
+                        "tipo_encuesta": "NO VINCULADO",
+                        "x": float(local['lon']) if pd.notna(local['lon']) else None,
+                        "y": float(local['lat']) if pd.notna(local['lat']) else None,
+                        "usuario_encuestador": "WEB_ADMIN",
+                        "creator": "WEB_ADMIN"
+                    }
+
+                    try:
+                        response = supabase.table("campo_censo").insert(datos_no_vinc).execute()
+                        if response.data:
+                            st.warning("⚠️ Registrado en la base de datos como NO VINCULADO.")
+                            st.session_state['no_vinculados'].add(st.session_state['seleccion_id'])
+                            st.session_state['seleccion_id'] = None
                             st.session_state['temp_vinc'] = None
                             st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error al guardar no vinculado: {e}")
+
+                if c2.button("❌ VOLVER A BUSCAR", use_container_width=True):
+                    st.session_state['temp_vinc'] = None
+                    st.rerun()
             else:
                 vinc = st.session_state['temp_vinc']
                 st.warning(f"### 🛡️ Ficha Unificada ({vinc['metodo']})")
@@ -275,7 +282,6 @@ with col_audit:
                 cf1, cf2 = st.columns(2)
                 
                 if cf1.button("🚀 MIGRAR A CAMPO", type="primary", use_container_width=True):
-                    # Función auxiliar para asegurar que los datos sean serializables
                     def limpiar_valor(v):
                         if isinstance(v, (np.int64, np.int32)): return int(v)
                         if isinstance(v, (np.float64, np.float32)): return float(v)
@@ -297,13 +303,12 @@ with col_audit:
                         "x": limpiar_valor(local['lon']),
                         "y": limpiar_valor(local['lat']),
                         "creator": "WEB_ADMIN",
-                        "editor": "WEB_ADMIN"
+                        "editor": "WEB_ADMIN",
+                        "tipo_encuesta": "EFECTIVA-INDIRECTA"
                     }
 
                     try:
-                        # Convertimos todo el diccionario por si acaso
                         datos_limpios = {k: limpiar_valor(v) for k, v in datos_a_insertar.items()}
-                        
                         response = supabase.table("campo_censo").insert(datos_limpios).execute()
                         if response.data:
                             st.success("✅ ¡Registro migrado exitosamente!")
