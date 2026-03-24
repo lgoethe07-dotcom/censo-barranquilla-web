@@ -227,16 +227,42 @@ with col_audit:
                 st.rerun()
         else:
             if st.session_state['temp_vinc'] == 'CANCELAR_NO':
-                st.error("### ¿Confirmar No Encontrado?")
-                c1, c2 = st.columns(2)
-                if c1.button("✅ SÍ", use_container_width=True):
-                    st.session_state['no_vinculados'].add(st.session_state['seleccion_id'])
-                    st.session_state['seleccion_id'] = None
-                    st.session_state['temp_vinc'] = None
-                    st.rerun()
-                if c2.button("❌ Volver", use_container_width=True):
-                    st.session_state['temp_vinc'] = None
-                    st.rerun()
+                        st.error("### ¿Confirmar No Encontrado?")
+                        st.write("El establecimiento se marcará para levantamiento total en campo.")
+                        c1, c2 = st.columns(2)
+                        
+                        if c1.button("✅ SÍ, REGISTRAR PENDIENTE", use_container_width=True):
+                            # Preparamos los datos para la base de datos de campo
+                            # Estos son los registros que la App Móvil deberá capturar desde cero
+                            datos_no_vinc = {
+                                "id_encuesta": int(local['id_int']),
+                                "nombre_comercial": local['nombre_comercial'],
+                                "direccion_completa": local['direccion_comercial'],
+                                "estado_encuesta": "SIN REVISAR",
+                                "tipo_encuesta": "NO VINCULADO", # Identificador clave para la App Móvil
+                                "x": float(local['lon']) if pd.notna(local['lon']) else None,
+                                "y": float(local['lat']) if pd.notna(local['lat']) else None,
+                                "usuario_encuestador": "WEB_ADMIN",
+                                "creator": "WEB_ADMIN"
+                            }
+            
+                            try:
+                                # Insertar en la tabla de Supabase
+                                response = supabase.table("campo_censo").insert(datos_no_vinc).execute()
+                                
+                                if response.data:
+                                    st.warning("⚠️ Registrado en la base de datos como NO VINCULADO.")
+                                    # Actualizamos la memoria local para que el punto cambie de color en el mapa
+                                    st.session_state['no_vinculados'].add(st.session_state['seleccion_id'])
+                                    st.session_state['seleccion_id'] = None
+                                    st.session_state['temp_vinc'] = None
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error al guardar no vinculado: {e}")
+            
+                        if c2.button("❌ VOLVER A BUSCAR", use_container_width=True):
+                            st.session_state['temp_vinc'] = None
+                            st.rerun()
             else:
                 vinc = st.session_state['temp_vinc']
                 st.warning(f"### 🛡️ Ficha Unificada ({vinc['metodo']})")
