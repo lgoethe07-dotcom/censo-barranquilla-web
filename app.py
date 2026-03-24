@@ -19,6 +19,10 @@ except Exception as e:
 # --- 2. CONFIGURACIÓN Y ESTILOS ---
 st.set_page_config(page_title="Gestión de Precenso - Barranquilla", layout="wide")
 
+# Inicialización de estados de autenticación
+if 'autenticado' not in st.session_state: st.session_state['autenticado'] = False
+if 'user_name' not in st.session_state: st.session_state['user_name'] = ""
+
 st.markdown("""
     <style>
     .block-container {padding-top: 1rem; padding-bottom: 0rem;}
@@ -37,8 +41,50 @@ st.markdown("""
         padding: 10px; border-radius: 5px; font-size: 12px;
         border: 1px solid #ccc;
     }
+    /* Estilo para el indicador de usuario en la esquina */
+    .user-tag {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        z-index: 999999;
+        background: #1f2d3d;
+        color: white;
+        padding: 5px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: bold;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
     </style>
     """, unsafe_allow_html=True)
+
+# --- FUNCIÓN DE LOGIN ---
+def login():
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        st.write("#")
+        st.markdown("### 🔐 Acceso al Sistema")
+        with st.form("login"):
+            usuario = st.text_input("Usuario")
+            clave = st.text_input("Contraseña", type="password")
+            if st.form_submit_button("Ingresar", use_container_width=True):
+                res = supabase.table("usuarios").select("*").eq("usuario", usuario).eq("clave", clave).execute()
+                if res.data:
+                    st.session_state['autenticado'] = True
+                    st.session_state['user_name'] = res.data[0]['nombre']
+                    st.rerun()
+                else:
+                    st.error("Usuario o clave incorrectos")
+    st.stop()
+
+# Si no está autenticado, detiene la ejecución aquí y muestra el login
+if not st.session_state['autenticado']:
+    login()
+
+# Muestra el nombre del usuario en la esquina superior izquierda (CSS fijo)
+st.markdown(f'<div class="user-tag">👤 {st.session_state["user_name"]}</div>', unsafe_allow_html=True)
+
+# --- TU LÓGICA ORIGINAL CONTINÚA AQUÍ SIN CAMBIOS ---
 
 # Memoria de la aplicación (Sesión actual)
 if 'base_campo' not in st.session_state: st.session_state['base_campo'] = []
@@ -252,8 +298,8 @@ with col_audit:
                         "tipo_encuesta": "NO VINCULADO",
                         "x": float(local['lon']) if pd.notna(local['lon']) else None,
                         "y": float(local['lat']) if pd.notna(local['lat']) else None,
-                        "usuario_encuestador": "WEB_ADMIN",
-                        "creator": "WEB_ADMIN"
+                        "usuario_encuestador": st.session_state['user_name'],
+                        "creator": st.session_state['user_name']
                     }
 
                     try:
@@ -299,11 +345,11 @@ with col_audit:
                         "act_economica_primaria": vinc['hijo'].get('ciiu'),
                         "correo_electronico": vinc['padre'].get('correo_comercial'),
                         "telefono_principal": vinc['padre'].get('telefono'),
-                        "usuario_encuestador": "WEB_ADMIN",
+                        "usuario_encuestador": st.session_state['user_name'],
                         "x": limpiar_valor(local['lon']),
                         "y": limpiar_valor(local['lat']),
-                        "creator": "WEB_ADMIN",
-                        "editor": "WEB_ADMIN",
+                        "creator": st.session_state['user_name'],
+                        "editor": st.session_state['user_name'],
                         "tipo_encuesta": "EFECTIVA-INDIRECTA"
                     }
 
