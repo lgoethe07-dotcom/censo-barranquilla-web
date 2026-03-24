@@ -6,12 +6,18 @@ import re
 import os
 from datetime import datetime
 from difflib import SequenceMatcher
+from supabase import create_client
 
-# --- 0. CONFIGURACIÓN DE RUTAS ---
-# Ajusta esta ruta a la ubicación real de tus fotos en tu PC
-CARPETA_FOTOS = r"C:\Censo_Barranquilla\Fotos" 
+# --- 1. CONFIGURACIÓN DE CONEXIÓN (PRODUCCIÓN) ---
+# Asegúrate de configurar estos en Settings > Secrets en Streamlit Cloud
+try:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    supabase = create_client(url, key)
+except Exception as e:
+    st.error("Error al cargar las credenciales de Supabase. Revisa los Secrets.")
 
-# --- 1. CONFIGURACIÓN Y ESTILOS ---
+# --- 2. CONFIGURACIÓN Y ESTILOS ---
 st.set_page_config(page_title="Gestión de Precenso - Barranquilla", layout="wide")
 
 st.markdown("""
@@ -41,7 +47,7 @@ if 'no_vinculados' not in st.session_state: st.session_state['no_vinculados'] = 
 if 'seleccion_id' not in st.session_state: st.session_state['seleccion_id'] = None
 if 'temp_vinc' not in st.session_state: st.session_state['temp_vinc'] = None
 
-# --- FUNCIONES DE APOYO ---
+# --- 3. FUNCIONES DE APOYO ---
 def calcular_similitud(a, b):
     return SequenceMatcher(None, str(a).upper(), str(b).upper()).ratio()
 
@@ -64,15 +70,22 @@ def limpiar_nombre_busqueda(nombre):
 
 @st.cache_data
 def cargar_datos():
-    # Rutas de las bases de datos
-    df_p = pd.read_csv(r"C:\Censo_Barranquilla\Precenso\BASE_PRECENSO_LISTO.csv", sep=';', encoding='utf-8-sig')
-    df_p.columns = df_p.columns.str.strip()
-    df_p['ID_INT'] = range(len(df_p))
+    # Carga desde Supabase en lugar de CSV local
+    res_p = supabase.table("precenso_pendientes").select("*").execute()
+    df_p = pd.DataFrame(res_p.data)
+    
+    # Normalizar nombres de columnas a minúsculas por compatibilidad con Postgres
+    df_p.columns = df_p.columns.str.lower()
+    
+    # Lógica de ID y coordenadas
+    df_p['id_int'] = range(len(df_p))
     df_p['lon'] = df_p['x'].apply(corregir_coordenada)
     df_p['lat'] = df_p['y'].apply(corregir_coordenada)
     
-    df_c = pd.read_csv(r"C:\Censo_Barranquilla\data\BASE_CAMARA_COMERCIO.csv", sep=';', encoding='latin-1')
-    df_c.columns = df_c.columns.str.strip()
+    res_c = supabase.table("camara_comercio").select("*").execute()
+    df_c = pd.DataFrame(res_c.data)
+    df_c.columns = df_c.columns.str.lower()
+    
     return df_p, df_c
 
 def buscar_propietario_legal(hijo, df_full):
@@ -97,14 +110,14 @@ def buscar_propietario_legal(hijo, df_full):
 
 df_pre, df_cc = cargar_datos()
 
-# --- 2. HEADER Y ESTADÍSTICAS ---
+# --- 4. HEADER Y ESTADÍSTICAS ---
 st.write("") 
 col_t1, col_t2 = st.columns([0.8, 0.2])
 with col_t1:
-    st.title("🚀 Gestión de Precenso - Barranquilla")
+    st.title("🚀 Gestión de Precenso - Barranquilla (Nube)")
 with col_t2:
     st.write("###") 
-    if st.button("🔄 Actualizar Bases", use_container_width=True):
+    if st.button("🔄 Actualizar Datos", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
@@ -120,14 +133,14 @@ m5.metric("Pendientes", len(df_pre) - len(v_ids) - len(nv_ids))
 
 st.markdown("---")
 
-# --- 3. PANEL PRINCIPAL ---
+# --- 5. PANEL PRINCIPAL ---
 col_map, col_audit = st.columns([1.6, 1])
 
 with col_map:
     df_mapa = df_pre.dropna(subset=['lat', 'lon']).copy()
     def asignar_color(row):
-        if row['ID_INT'] in v_ids: return [0, 114, 255, 200]
-        elif row['ID_INT'] in nv_ids: return [255, 150, 0, 200]
+        if row['id_int'] in v_ids: return [0, 114, 255, 200]
+        elif row['id_int'] in nv_ids: return [255, 150, 0, 200]
         else: return [40, 167, 69, 160]
 
     df_mapa['color_dinamico'] = df_mapa.apply(asignar_color, axis=1)
@@ -135,7 +148,7 @@ with col_map:
                             get_color='color_dinamico', get_radius=3.5, pickable=True)
     capas = [capa_puntos]
     if st.session_state['seleccion_id'] is not None:
-        p_sel = df_pre[df_pre['ID_INT'] == st.session_state['seleccion_id']]
+        p_sel = df_pre[df_pre['id_int'] == st.session_state['seleccion_id']]
         capas.append(pdk.Layer("ScatterplotLayer", p_sel, get_position='[lon, lat]',
                                get_color='[255, 0, 0, 255]', get_radius=12, stroked=True, filled=False, line_width_min_pixels=2))
 
@@ -147,12 +160,12 @@ with col_map:
 with col_audit:
     st.markdown('<div class="section-header">🔍 BÚSQUEDA Y SELECCIÓN</div>', unsafe_allow_html=True)
     busqueda = st.text_input("Filtrar:", key="busqueda_global", label_visibility="collapsed", placeholder="Buscar establecimiento...")
-    df_pendientes = df_pre[~df_pre['ID_INT'].isin(v_ids + nv_ids)]
+    df_pendientes = df_pre[~df_pre['id_int'].isin(v_ids + nv_ids)]
     df_lista = df_pendientes[df_pendientes['nombre_comercial'].str.contains(busqueda, case=False, na=False)]
     sel = st.selectbox("Lista:", ["- Seleccionar -"] + df_lista['nombre_comercial'].tolist())
     
     if sel != "- Seleccionar -":
-        id_n = df_pre[df_pre['nombre_comercial'] == sel]['ID_INT'].values[0]
+        id_n = df_pre[df_pre['nombre_comercial'] == sel]['id_int'].values[0]
         if st.session_state['seleccion_id'] != id_n:
             st.session_state['seleccion_id'] = id_n
             st.session_state['temp_vinc'] = None
@@ -162,28 +175,14 @@ with col_audit:
         local = df_pre.iloc[st.session_state['seleccion_id']]
         st.markdown('<div class="section-header">📍 DATOS DEL PRE-CENSO</div>', unsafe_allow_html=True)
         
-        # --- SECCIÓN DE FOTO E INFO ---
         c_info, c_foto = st.columns([0.6, 0.4])
         with c_info:
             st.info(f"**Establecimiento:** {local['nombre_comercial']}\n\n**Dir:** {local['direccion_comercial']}")
         
         with c_foto:
-            # Limpiamos el nombre del archivo del CSV
-            foto_raw = str(local.get('nombre_foto', '')).strip()
-            
-            if foto_raw and foto_raw.lower() not in ['nan', 'none', '', '0']:
-                # Extraemos solo el nombre (ej: 06.png) ignorando rutas previas
-                nombre_archivo = os.path.basename(foto_raw)
-                ruta_final = os.path.join(CARPETA_FOTOS, nombre_archivo)
-                
-                if os.path.exists(ruta_final):
-                    st.image(ruta_final, use_container_width=True, caption=f"ID: {local.get('ID', 'S/N')}")
-                else:
-                    st.error("🚫 Foto no hallada")
-                    st.caption(f"Buscado en: {nombre_archivo}")
-            else:
-                st.warning("⚪ Sin foto")
-        # ------------------------------
+            # En producción se manejará mediante URLs de Supabase Storage más adelante
+            st.warning("🖼️ Foto (Versión Nube)")
+            st.caption(f"ID Foto: {local.get('nombre_foto', 'N/A')}")
 
         if st.session_state['temp_vinc'] is None:
             st.markdown('<div class="section-header">🏢 OPCIONES CÁMARA DE COMERCIO</div>', unsafe_allow_html=True)
@@ -207,7 +206,6 @@ with col_audit:
                     bg_color = "#d4edda" if es_mejor else "#f8d7da"
                     border_color = "#28a745" if es_mejor else "#f5c6cb"
                     
-                    # MODIFICACIÓN: Mostrar similitud de nombre y dirección por separado
                     st.markdown(f"""
                         <div style="background-color:{bg_color}; border: 2px solid {border_color}; padding: 8px; border-radius: 5px; margin-bottom: 5px;">
                             <strong>{r["nombre_comercial"]}</strong><br>
@@ -217,7 +215,6 @@ with col_audit:
                     
                     with st.expander(f"Detalles..."):
                         st.write(f"**NIT:** {r.get('numero_identificacion', 'N/A')}")
-                        # MODIFICACIÓN: Agregar dirección de CC en el detalle
                         st.write(f"**Dirección CC:** {r.get('direccion_comercial', 'N/A')}")
                         if st.button("Analizar Vinculación", key=f"v_{i}", type="primary", use_container_width=True):
                             padre, metodo = buscar_propietario_legal(r, df_cc)
@@ -252,7 +249,7 @@ with col_audit:
                 st.table(resumen)
                 cf1, cf2 = st.columns(2)
                 if cf1.button("🚀 MIGRAR A CAMPO", type="primary", use_container_width=True):
-                    st.session_state['base_campo'].append({"id_encuesta": local['ID_INT'], "data": vinc})
+                    st.session_state['base_campo'].append({"id_encuesta": local['id_int'], "data": vinc})
                     st.session_state['seleccion_id'] = None
                     st.session_state['temp_vinc'] = None
                     st.rerun()
