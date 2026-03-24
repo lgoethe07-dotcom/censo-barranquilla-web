@@ -249,26 +249,36 @@ with col_audit:
                 cf1, cf2 = st.columns(2)
                 
                 if cf1.button("🚀 MIGRAR A CAMPO", type="primary", use_container_width=True):
+                    # Función auxiliar para asegurar que los datos sean serializables
+                    def limpiar_valor(v):
+                        if isinstance(v, (np.int64, np.int32)): return int(v)
+                        if isinstance(v, (np.float64, np.float32)): return float(v)
+                        if pd.isna(v): return None
+                        return v
+
                     datos_a_insertar = {
-                        "id_encuesta": local['id_int'],
+                        "id_encuesta": limpiar_valor(local['id_int']),
                         "tipo_documento": vinc['padre'].get('tipo_identificacion'),
                         "numero_documento": vinc['padre'].get('numero_identificacion'),
                         "razon_social": vinc['padre'].get('razon_social'),
                         "nombre_comercial": local['nombre_comercial'],
                         "direccion_completa": vinc['hijo'].get('direccion_comercial'),
                         "tipo_contribuyente": vinc['padre'].get('org_juridica'),
-                        "act_economica_primaria": ciiu_final,
+                        "act_economica_primaria": vinc['hijo'].get('ciiu'),
                         "correo_electronico": vinc['padre'].get('correo_comercial'),
                         "telefono_principal": vinc['padre'].get('telefono'),
                         "usuario_encuestador": "WEB_ADMIN",
-                        "x": local['lon'],
-                        "y": local['lat'],
+                        "x": limpiar_valor(local['lon']),
+                        "y": limpiar_valor(local['lat']),
                         "creator": "WEB_ADMIN",
                         "editor": "WEB_ADMIN"
                     }
 
                     try:
-                        response = supabase.table("campo_censo").insert(datos_a_insertar).execute()
+                        # Convertimos todo el diccionario por si acaso
+                        datos_limpios = {k: limpiar_valor(v) for k, v in datos_a_insertar.items()}
+                        
+                        response = supabase.table("campo_censo").insert(datos_limpios).execute()
                         if response.data:
                             st.success("✅ ¡Registro migrado exitosamente!")
                             st.session_state['base_campo'].append({"id_encuesta": local['id_int'], "data": vinc})
