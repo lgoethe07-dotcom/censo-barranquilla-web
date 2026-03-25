@@ -1,138 +1,130 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import pydeck as pdk
 from datetime import datetime
-from difflib import SequenceMatcher
 from supabase import create_client
 
-# --- 1. CONEXIÓN ---
-try:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    supabase = create_client(url, key)
-except:
-    st.error("Error de conexión. Verifica los Secrets de Supabase.")
+# --- CONEXIÓN ---
+url = st.secrets["SUPABASE_URL"]
+key = st.secrets["SUPABASE_KEY"]
+supabase = create_client(url, key)
 
-# --- 2. CONFIGURACIÓN E INTERFAZ ---
-st.set_page_config(page_title="Censo Campo - Registro Directo", layout="wide")
+st.set_page_config(page_title="Módulo Campo - Mapa", layout="wide")
 
-st.markdown("""
-    <style>
-    .main { background-color: #f5f7f9; }
-    .stButton>button { width: 100%; border-radius: 5px; }
-    .status-box { padding: 10px; border-radius: 5px; margin-bottom: 10px; border: 1px solid #ddd; }
-    .user-tag { position: fixed; top: 10px; left: 10px; z-index: 999; background: #1f2d3d; color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-if 'user_name' not in st.session_state: st.session_state['user_name'] = "ENCUESTADOR_PRO"
-st.markdown(f'<div class="user-tag">👤 {st.session_state["user_name"]}</div>', unsafe_allow_html=True)
-
-# --- 3. FUNCIONES DE LÓGICA ---
-def calcular_similitud(a, b):
-    return SequenceMatcher(None, str(a).upper(), str(b).upper()).ratio()
-
-@st.cache_data
-def obtener_pendientes():
-    # Solo traemos los registros que no han sido censados efectivamente
+# --- CARGA DE DATOS (NO VINCULADOS) ---
+@st.cache_data(ttl=10)
+def cargar_puntos_mapa():
     res = supabase.table("campo_censo").select("*").eq("tipo_encuesta", "NO VINCULADO").execute()
-    return pd.DataFrame(res.data)
+    df = pd.DataFrame(res.data)
+    if not df.empty:
+        # Asegurar que las coordenadas sean numéricas
+        df['x'] = pd.to_numeric(df['x'])
+        df['y'] = pd.to_numeric(df['y'])
+    return df
 
-# --- 4. PANEL DE CONTROL ---
-st.title("📋 Módulo de Campo: Identificación y Registro")
+st.title("🗺️ Módulo de Campo: Identificación y Registro")
+df_nv = cargar_puntos_mapa()
 
-df_pendientes = obtener_pendientes()
-
-if df_pendientes.empty:
-    st.success("✅ No hay puntos 'No Vinculados' pendientes de procesar.")
+if df_nv.empty:
+    st.success("No hay puntos pendientes por censar.")
 else:
-    col_izq, col_der = st.columns([1, 1.2])
+    col_mapa, col_formulario = st.columns([1.5, 1])
 
-    with col_izq:
-        st.subheader("📍 Selección de Punto")
-        busqueda_lista = st.text_input("Buscar en lista de pendientes:", placeholder="Nombre o dirección...")
+    with col_mapa:
+        st.subheader("Seleccione un punto en el mapa")
         
-        df_ver = df_pendientes
-        if busqueda_lista:
-            df_ver = df_pendientes[df_pendientes['nombre_comercial'].str.contains(busqueda_lista, case=False, na=False)]
+        # Configuración del estado inicial del mapa (centrado en los puntos)
+        view_state = pdk.ViewState(
+            latitude=df_nv['y'].mean(),
+            longitude=df_nv['x'].mean(),
+            zoom=14,
+            pitch=0
+        )
+
+        # Capa de puntos (Capa interactiva)
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            df_nv,
+            get_position='[x, y]',
+            get_color='[230, 0, 0, 160]', # Rojo para pendientes
+            get_radius=15,
+            pickable=True, # IMPORTANTE: Permite interactuar
+        )
+
+        # Renderizar mapa con evento de clic
+        mapa_interactivo = pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            map_style="mapbox://styles/mapbox/light-v9",
+            tooltip={"text": "{nombre_comercial}\n{direccion_completa}"}
+        )
+
+        # Capturar el evento de selección
+        evento_clic = st.pydeck_chart(mapa_interactivo, on_select="rerun")
         
-        # Lista de selección
-        opciones = ["- Seleccione un punto -"] + df_ver['nombre_comercial'].tolist()
-        seleccion = st.selectbox("Puntos cercanos:", opciones)
+        # Lógica de detección de clic
+        if evento_clic and 'selection' in evento_clic and evento_clic['selection']['indices']:
+            idx = evento_clic['selection']['indices'][0]
+            st.session_state['pa'] = df_nv.iloc[idx].to_dict()
+            st.session_state['vinc'] = None # Reset vinculación anterior
 
-        if seleccion != "- Seleccione un punto -":
-            item = df_ver[df_ver['nombre_comercial'] == seleccion].iloc[0].to_dict()
-            st.session_state['punto_actual'] = item
+    with col_formulario:
+        if 'pa' in st.session_state and st.session_state['pa']:
+            pa = st.session_state['pa']
+            st.markdown(f"### 📋 Formulario: {pa['nombre_comercial']}")
+            st.caption(f"📍 Dirección: {pa['direccion_completa']}")
             
-            # Mapa de referencia (Precenso)
-            st.write("**Ubicación Precenso:**")
-            view_state = pdk.ViewState(latitude=item['y'], longitude=item['x'], zoom=17)
-            capa = pdk.Layer("ScatterplotLayer", pd.DataFrame([item]), get_position='[x, y]', get_color='[255, 0, 0]', get_radius=10)
-            st.pydeck_chart(pdk.Deck(layers=[capa], initial_view_state=view_state, map_style="light"))
-
-    with col_der:
-        if 'punto_actual' in st.session_state:
-            pa = st.session_state['punto_actual']
-            st.subheader(f"🔍 Identificación: {pa['nombre_comercial']}")
+            # --- PRIORIDADES DE BÚSQUEDA ---
+            st.divider()
+            tab1, tab2 = st.tabs(["🔍 Por Nombre (Aviso)", "🆔 Por NIT/ID"])
             
-            # --- FLUJO DE PRIORIDAD ---
-            with st.expander("1️⃣ Prioridad: Búsqueda por Nombre / Aviso", expanded=True):
-                nombre_aviso = st.text_input("Nombre visible en el aviso o informado:")
-                if st.button("Buscar coincidencias en Cámara"):
-                    # Lógica de búsqueda en base de datos de Cámara de Comercio
-                    res_cc = supabase.table("camara_comercio").select("*").ilike("nombre_comercial", f"%{nombre_aviso}%").limit(5).execute()
-                    if res_cc.data:
-                        st.session_state['resultados_cc'] = res_cc.data
-                    else:
-                        st.warning("No se encontraron coincidencias exactas. Intente con otra palabra clave.")
+            with tab1:
+                busq_nombre = st.text_input("Nombre visto en el establecimiento:", key="in_nom")
+                if st.button("Buscar en Cámara", key="btn_nom"):
+                    res = supabase.table("camara_comercio").select("*").ilike("nombre_comercial", f"%{busq_nombre}%").limit(5).execute()
+                    st.session_state['resultados'] = res.data
 
-            with st.expander("2️⃣ Prioridad: Búsqueda por NIT / ID"):
-                nit_informado = st.text_input("NIT o Cédula (Si el establecimiento lo facilita):")
-                if st.button("Validar ID"):
-                    res_nit = supabase.table("camara_comercio").select("*").eq("numero_identificacion", nit_informado).execute()
-                    if res_nit.data:
-                        st.session_state['resultados_cc'] = res_nit.data
-                        st.success("¡Registro encontrado por ID!")
-                    else:
-                        st.error("ID no encontrado en la base de referencia.")
+            with tab2:
+                busq_nit = st.text_input("Número de identificación:", key="in_nit")
+                if st.button("Validar NIT", key="btn_nit"):
+                    res = supabase.table("camara_comercio").select("*").eq("numero_identificacion", busq_nit).execute()
+                    st.session_state['resultados'] = res.data
 
-            # Mostrar resultados de búsqueda para vincular
-            if 'resultados_cc' in st.session_state:
-                st.write("### Seleccione el registro correcto:")
-                for res in st.session_state['resultados_cc']:
-                    col_res, col_btn = st.columns([3, 1])
-                    col_res.markdown(f"**{res['nombre_comercial']}** - {res['numero_identificacion']}\n*{res['direccion_comercial']}*")
-                    if col_btn.button("Vincular", key=f"vinc_{res['numero_identificacion']}"):
-                        st.session_state['vinc_final'] = res
-                        st.info(f"Seleccionado: {res['nombre_comercial']}")
+            # --- RESULTADOS PARA VINCULAR ---
+            if 'resultados' in st.session_state and st.session_state['resultados']:
+                for r in st.session_state['resultados']:
+                    with st.expander(f"📌 {r['razon_social']}"):
+                        st.write(f"NIT: {r['numero_identificacion']}")
+                        if st.button("Vincular este registro", key=f"v_{r['numero_identificacion']}"):
+                            st.session_state['vinc'] = r
 
-            # --- FORMULARIO DE CIERRE ---
-            if 'vinc_final' in st.session_state or st.checkbox("El negocio es totalmente nuevo / No está en Cámara"):
-                st.divider()
-                st.write("### 📸 Registro Fotográfico y GPS")
+            # --- GUARDADO FINAL ---
+            if 'vinc' in st.session_state and st.session_state['vinc']:
+                v = st.session_state['vinc']
+                st.success(f"Listo para vincular con: **{v['razon_social']}**")
                 
-                # GPS - En Web es manual o por browser, en Nativa será automático
-                c_gps1, c_gps2 = st.columns(2)
-                lat_real = c_gps1.number_input("Latitud GPS Real", value=float(pa['y']), format="%.6f")
-                lon_real = c_gps2.number_input("Longitud GPS Real", value=float(pa['x']), format="%.6f")
-
-                # FOTOS
-                f1 = st.file_uploader("1. Fachada (OBLIGATORIO)", type=['jpg', 'png', 'jpeg'])
-                f2 = st.file_uploader("2. Comprobante de Visita (OPCIONAL)", type=['jpg', 'png', 'jpeg'])
-                f3 = st.file_uploader("3. Copia de RUT (OPCIONAL)", type=['jpg', 'png', 'jpeg'])
-
-                if st.button("🚀 FINALIZAR CENSO Y SINCRONIZAR", type="primary"):
-                    if not f1:
-                        st.error("La fotografía de la fachada es obligatoria para continuar.")
-                    else:
-                        # Aquí iría el proceso de:
-                        # 1. Subir fotos a Supabase Storage
-                        # 2. Actualizar campo_censo con los nuevos datos y coordenadas
-                        # 3. Cambiar tipo_encuesta a 'EFECTIVA-DIRECTA'
-                        st.success("Procesando sincronización... (Simulado)")
-                        st.balloons()
-                        # Limpiar estados
-                        for key in ['punto_actual', 'resultados_cc', 'vinc_final']:
-                            if key in st.session_state: del st.session_state[key]
+                with st.form("finalizar"):
+                    st.write("📌 **Validar Coordenada Real**")
+                    c1, c2 = st.columns(2)
+                    lat_r = c1.number_input("Latitud GPS", value=float(pa['y']), format="%.6f")
+                    lon_r = c2.number_input("Longitud GPS", value=float(pa['x']), format="%.6f")
+                    
+                    if st.form_submit_button("✅ GUARDAR Y CERRAR PUNTO"):
+                        # Sincronización a Supabase
+                        data_upd = {
+                            "tipo_documento": v['tipo_identificacion'],
+                            "numero_documento": v['numero_identificacion'],
+                            "razon_social": v['razon_social'],
+                            "lat_real": lat_r,
+                            "lon_real": lon_r,
+                            "tipo_encuesta": "EFECTIVA-DIRECTA",
+                            "fecha_sincronizacion": datetime.now().isoformat()
+                        }
+                        supabase.table("campo_censo").update(data_upd).eq("id_encuesta", pa['id_encuesta']).execute()
+                        
+                        st.success("Sincronizado con éxito.")
+                        st.session_state['pa'] = None
+                        st.cache_data.clear()
                         st.rerun()
+        else:
+            st.info("Seleccione un punto rojo en el mapa para cargar su información.")
