@@ -123,6 +123,7 @@ else:
 
                             st.info(f"🛡️ **Vínculo:** {metodo}")
                             
+                            # --- BLOQUE DE GUARDADO CORREGIDO ---
                             update_data = {
                                 "tipo_documento": str(socio_legal.get('tipo_identificacion', '')),
                                 "numero_documento": str(socio_legal.get('numero_identificacion', '')),
@@ -130,20 +131,28 @@ else:
                                 "act_economica_primaria": str(r.get('ciiu', '')),
                                 "tipo_encuesta": "EFECTIVA-DIRECTA",
                                 "estado_encuesta": "COMPLETO",
-                                "fecha_sincronizacion": datetime.now().isoformat()
+                                "editor": st.session_state.get('user_name', 'CAMPO_APP')
+                                # Se eliminó 'fecha_sincronizacion' para evitar el error PGRST204
                             }
 
                             try:
-                                clean_upd = {k: limpiar_valor(v) for k, v in update_data.items()}
-                                id_target = int(pa['id_encuesta']) # Forzar int puro
+                                # 1. Limpieza estricta de datos
+                                clean_upd = {k: limpiar_valor(v) for k, v in update_data.items() if v not in ['', None, 'nan']}
                                 
-                                supabase.table("campo_censo").update(clean_upd).eq("id_encuesta", id_target).execute()
+                                # 2. Forzar ID a entero para evitar fallos de caché de esquema
+                                id_target = int(pa['id_encuesta']) 
                                 
-                                st.success("✅ ¡Vinculación Exitosa!")
-                                st.cache_data.clear()
-                                if 'res_df_campo' in st.session_state: del st.session_state['res_df_campo']
-                                st.rerun()
+                                # 3. Ejecutar actualización
+                                response = supabase.table("campo_censo").update(clean_upd).eq("id_encuesta", id_target).execute()
+                                
+                                if response.data:
+                                    st.success("✅ ¡Vinculación Exitosa!")
+                                    st.cache_data.clear()
+                                    if 'res_df_campo' in st.session_state: 
+                                        del st.session_state['res_df_campo']
+                                    st.rerun()
+                                else:
+                                    st.error("No se recibió confirmación de la base de datos.")
+                                    
                             except Exception as e:
                                 st.error(f"Error al actualizar: {e}")
-                        else:
-                            st.error("No se pudo determinar el propietario legal.")
