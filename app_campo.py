@@ -1,126 +1,146 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import pydeck as pdk
 from datetime import datetime
+from difflib import SequenceMatcher
 from supabase import create_client
 
-# --- 1. CONEXIÓN ---
+# --- 1. CONEXIÓN Y FUNCIONES DE APOYO ---
 url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
 supabase = create_client(url, key)
 
-st.set_page_config(page_title="Módulo Campo - Visualización", layout="wide")
+def calcular_similitud(a, b):
+    return SequenceMatcher(None, str(a).upper(), str(b).upper()).ratio()
 
-# --- 2. CARGA DE DATOS ---
-@st.cache_data(ttl=5)
-def cargar_puntos_mapa():
-    res = supabase.table("campo_censo").select("*").eq("tipo_encuesta", "NO VINCULADO").execute()
-    df = pd.DataFrame(res.data)
-    if not df.empty:
-        df['x'] = pd.to_numeric(df['x'])
-        df['y'] = pd.to_numeric(df['y'])
-    return df
+def extraer_via_principal(direccion):
+    partes = str(direccion).upper().split()
+    return " ".join(partes[:3]) if len(partes) >= 3 else str(direccion).upper()
 
-st.title("🗺️ Módulo de Campo: Identificación")
+def limpiar_valor(v):
+    if isinstance(v, (np.int64, np.int32)): return int(v)
+    if isinstance(v, (np.float64, np.float32)): return float(v)
+    if pd.isna(v): return None
+    return v
 
-df_nv = cargar_puntos_mapa()
+# --- LÓGICA DE PADRE/HIJO (MISMA DEL MODULO 1) ---
+def buscar_propietario_legal(hijo, df_full):
+    nit_hijo = str(hijo.get('numero_identificacion', '')).strip()
+    if nit_hijo not in ["", "nan", "None", "0"]:
+        return hijo, "Relación 1 a 1"
+    
+    # Búsqueda por matriz de llaves
+    f_mat = str(hijo.get('fecha_matricula', ''))
+    dir_c = str(hijo.get('direccion_comercial', '')).strip().upper()
+    mail = str(hijo.get('correo_comercial', '')).strip().lower()
+    
+    padres = df_full[df_full['numero_identificacion'].notna()]
+    res = padres[(padres['fecha_matricula'].astype(str) == f_mat) & 
+                 (padres['direccion_comercial'].str.upper() == dir_c) & 
+                 (padres['correo_comercial'].str.lower() == mail)]
+    
+    if not res.empty: return res.iloc[0].to_dict(), "Vinculación por Matriz (Hijo -> Padre)"
+    return None, "No encontrado"
+
+# --- 2. CONFIGURACIÓN UI ---
+st.set_page_config(page_title="Módulo Campo - Validación Pro", layout="wide")
+
+@st.cache_data(ttl=10)
+def cargar_todo():
+    # Cargar pendientes de campo
+    res_campo = supabase.table("campo_censo").select("*").eq("tipo_encuesta", "NO VINCULADO").execute()
+    # Cargar cámara de comercio completa para la lógica de padres
+    res_cc = supabase.table("camara_comercio").select("*").execute()
+    return pd.DataFrame(res_campo.data), pd.DataFrame(res_cc.data)
+
+df_nv, df_cc_full = cargar_todo()
+
+st.title("📋 Módulo de Campo: Validación y Vínculo")
 
 if df_nv.empty:
     st.success("No hay puntos pendientes.")
 else:
-    col_mapa, col_formulario = st.columns([1.5, 1])
-
-    # Inicializar punto seleccionado en session_state si no existe
-    if 'pa' not in st.session_state:
-        st.session_state['pa'] = None
+    col_mapa, col_form = st.columns([1.2, 1])
 
     with col_mapa:
-        opciones_puntos = ["- Seleccione un punto en la lista -"] + df_nv['nombre_comercial'].tolist()
-        seleccion_manual = st.selectbox("Buscar punto específico:", opciones_puntos)
+        # Selector y Mapa (Manteniendo tu lógica visual previa)
+        opciones = ["- Seleccione -"] + df_nv['nombre_comercial'].tolist()
+        sel_p = st.selectbox("Punto a validar:", opciones)
         
-        # Lógica para cargar punto desde el selector manual
-        df_seleccionado = pd.DataFrame()
-        if seleccion_manual != "- Seleccione un punto en la lista -":
-            punto_dict = df_nv[df_nv['nombre_comercial'] == seleccion_manual].iloc[0].to_dict()
-            st.session_state['pa'] = punto_dict
-            # Crear un dataframe pequeño con solo el seleccionado para la capa de enmarque
-            df_seleccionado = pd.DataFrame([punto_dict])
+        if sel_p != "- Seleccione -":
+            pa = df_nv[df_nv['nombre_comercial'] == sel_p].iloc[0].to_dict()
+            st.session_state['pa'] = pa
+            
+            # Vista Mapa Pro
+            view = pdk.ViewState(latitude=float(pa['y']), longitude=float(pa['x']), zoom=17)
+            capa = pdk.Layer("ScatterplotLayer", [pa], get_position='[x, y]', 
+                             get_color='[230, 0, 0, 200]', get_radius=10)
+            st.pydeck_chart(pdk.Deck(layers=[capa], initial_view_state=view, map_style="light"))
 
-        # --- CAPAS DEL MAPA ---
-        # Capa 1: Todos los puntos (Más pequeños)
-        layer_puntos = pdk.Layer(
-            "ScatterplotLayer",
-            df_nv,
-            get_position='[x, y]',
-            get_color='[230, 0, 0, 180]', # Rojo
-            get_radius=8,  # Puntos más pequeños
-            pickable=True
-        )
-
-        capas = [layer_puntos]
-
-        # Capa 2: Círculo de enmarque (Solo si hay selección)
-        if not df_seleccionado.empty:
-            layer_seleccion = pdk.Layer(
-                "ScatterplotLayer",
-                df_seleccionado,
-                get_position='[x, y]',
-                get_color='[0, 120, 255, 100]', # Azul transparente
-                get_radius=25, # Círculo más grande que envuelve al punto
-                stroked=True,
-                line_width_min_pixels=2,
-                get_line_color=[0, 120, 255]
-            )
-            capas.append(layer_seleccion)
-
-        # Configurar vista (centrar en selección o en el promedio)
-        lat_view = df_seleccionado['y'].iloc[0] if not df_seleccionado.empty else df_nv['y'].mean()
-        lon_view = df_seleccionado['x'].iloc[0] if not df_seleccionado.empty else df_nv['x'].mean()
-
-        view_state = pdk.ViewState(
-            latitude=lat_view,
-            longitude=lon_view,
-            zoom=17 if not df_seleccionado.empty else 15
-        )
-
-        r = pdk.Deck(
-            layers=capas,
-            initial_view_state=view_state,
-            map_style="light",
-            tooltip={"text": "{nombre_comercial}"}
-        )
-
-        st.pydeck_chart(r)
-
-    with col_formulario:
-        if st.session_state['pa']:
+    with col_form:
+        if 'pa' in st.session_state and st.session_state['pa']:
             pa = st.session_state['pa']
-            st.success(f"📌 Editando: {pa['nombre_comercial']}")
+            st.markdown(f"### Validando: {pa['nombre_comercial']}")
             
-            busq = st.text_input("Nombre o NIT para vincular:", key="search_box")
+            # BÚSQUEDA CON LÓGICA DE SIMILITUD
+            busq = st.text_input("Buscar por Nombre o NIT:", placeholder="Ej: Tienda La 70")
             
-            if st.button("Consultar Cámara"):
-                res_cc = supabase.table("camara_comercio").select("*") \
-                    .or_(f"nombre_comercial.ilike.%{busq}%,numero_identificacion.eq.{busq}") \
-                    .limit(5).execute()
-                st.session_state['res_busqueda'] = res_cc.data
+            if busq:
+                # Consulta a Supabase con OR
+                res_busq = supabase.table("camara_comercio").select("*").or_(f"nombre_comercial.ilike.%{busq}%,numero_identificacion.eq.{busq}").limit(10).execute()
+                res_df = pd.DataFrame(res_busq.data)
 
-            if 'res_busqueda' in st.session_state:
-                for r in st.session_state['res_busqueda']:
-                    with st.expander(f"🏢 {r['razon_social']}"):
-                        st.write(f"NIT: {r['numero_identificacion']}")
-                        if st.button("Vincular", key=f"v_{r['numero_identificacion']}"):
-                            update_data = {
-                                "tipo_documento": r['tipo_identificacion'],
-                                "numero_documento": r['numero_identificacion'],
-                                "razon_social": r['razon_social'],
-                                "tipo_encuesta": "EFECTIVA-DIRECTA",
-                                "fecha_sincronizacion": datetime.now().isoformat()
-                            }
-                            supabase.table("campo_censo").update(update_data).eq("id_encuesta", pa['id_encuesta']).execute()
-                            st.success("¡Vínculo exitoso!")
-                            st.session_state['pa'] = None
-                            st.cache_data.clear()
-                            st.rerun()
-        else:
-            st.info("Selecciona un establecimiento de la lista.")
+                if not res_df.empty:
+                    st.write("---")
+                    # Calcular Similitud igual que Modulo 1
+                    dir_base = extraer_via_principal(pa['direccion_completa'])
+                    res_df['s_nom'] = res_df['nombre_comercial'].apply(lambda x: calcular_similitud(x, pa['nombre_comercial']))
+                    res_df['s_dir'] = res_df['direccion_comercial'].apply(lambda x: calcular_similitud(extraer_via_principal(x), dir_base))
+                    
+                    for _, r in res_df.sort_values(by='s_nom', ascending=False).iterrows():
+                        # Diseño de tarjetas de similitud
+                        score = (r['s_nom'] + r['s_dir']) / 2
+                        color = "#d4edda" if score > 0.7 else "#fff3cd"
+                        
+                        with st.container():
+                            st.markdown(f"""
+                            <div style="background:{color}; padding:10px; border-radius:5px; border:1px solid #ccc; margin-bottom:5px">
+                                <b>{r['nombre_comercial']}</b><br>
+                                <small>📍 {r['direccion_comercial']}</small><br>
+                                <small>🎯 Similitud: {r['s_nom']:.0%} Nombre | {r['s_dir']:.0%} Dir</small>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            if st.button(f"Analizar Vínculo: {r['numero_identificacion'] if r['numero_identificacion'] else 'HIJO'}", key=f"btn_{r.name}"):
+                                # APLICAR LÓGICA PADRE/HIJO
+                                socio_legal, metodo = buscar_propietario_legal(r, df_cc_full)
+                                
+                                if socio_legal:
+                                    st.info(f"🛡️ **Vínculo Detectado:** {metodo}")
+                                    
+                                    # PREPARAR DATOS (Usando la función limpiar_valor para evitar el APIError)
+                                    update_data = {
+                                        "tipo_documento": str(socio_legal.get('tipo_identificacion', '')),
+                                        "numero_documento": str(socio_legal.get('numero_identificacion', '')),
+                                        "razon_social": str(socio_legal.get('razon_social', '')),
+                                        "act_economica_primaria": str(r.get('ciiu', '')),
+                                        "tipo_encuesta": "EFECTIVA-DIRECTA",
+                                        "estado_encuesta": "COMPLETO",
+                                        "fecha_sincronizacion": datetime.now().isoformat(),
+                                        "editor": st.session_state.get('user_name', 'CAMPO_APP')
+                                    }
+
+                                    try:
+                                        # LIMPIEZA DE DATOS ANTES DE ENVIAR
+                                        clean_upd = {k: limpiar_valor(v) for k, v in update_data.items()}
+                                        id_target = limpiar_valor(pa['id_encuesta'])
+                                        
+                                        supabase.table("campo_censo").update(clean_upd).eq("id_encuesta", id_target).execute()
+                                        st.success("✅ ¡Vinculación Exitosa y Punto Cerrado!")
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error técnico al actualizar: {e}")
+                                else:
+                                    st.error("No se pudo determinar un NIT/Padre para este registro.")
