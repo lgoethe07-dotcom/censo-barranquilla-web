@@ -4,15 +4,15 @@ import pydeck as pdk
 from datetime import datetime
 from supabase import create_client
 
-# --- CONEXIÓN ---
+# --- 1. CONEXIÓN ---
 url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
 supabase = create_client(url, key)
 
-st.set_page_config(page_title="Módulo Campo - Mapa", layout="wide")
+st.set_page_config(page_title="Módulo Campo - Estable", layout="wide")
 
-# --- CARGA DE DATOS ---
-@st.cache_data(ttl=10)
+# --- 2. CARGA DE DATOS ---
+@st.cache_data(ttl=5)
 def cargar_puntos_mapa():
     res = supabase.table("campo_censo").select("*").eq("tipo_encuesta", "NO VINCULADO").execute()
     df = pd.DataFrame(res.data)
@@ -21,27 +21,29 @@ def cargar_puntos_mapa():
         df['y'] = pd.to_numeric(df['y'])
     return df
 
-st.title("🗺️ Módulo de Campo: Identificación y Registro")
+st.title("🗺️ Módulo de Campo: Identificación")
 
 df_nv = cargar_puntos_mapa()
 
 if df_nv.empty:
     st.success("No hay puntos pendientes.")
 else:
-    # --- ESTADO DE SELECCIÓN ---
-    if 'pa' not in st.session_state:
-        st.session_state['pa'] = None
-
     col_mapa, col_formulario = st.columns([1.5, 1])
 
     with col_mapa:
-        st.subheader("Seleccione un punto rojo")
+        # --- RESPALDO: Selector manual si el clic falla ---
+        opciones_puntos = ["- Seleccione un punto en el mapa o aquí -"] + df_nv['nombre_comercial'].tolist()
+        seleccion_manual = st.selectbox("Buscar punto específico:", opciones_puntos)
         
+        # Lógica para cargar punto desde el selector manual
+        if seleccion_manual != "- Seleccione un punto en el mapa o aquí -":
+            st.session_state['pa'] = df_nv[df_nv['nombre_comercial'] == seleccion_manual].iloc[0].to_dict()
+
+        # --- CONFIGURACIÓN DEL MAPA ---
         view_state = pdk.ViewState(
             latitude=df_nv['y'].mean(),
             longitude=df_nv['x'].mean(),
-            zoom=15,
-            pitch=0
+            zoom=15
         )
 
         layer = pdk.Layer(
@@ -49,60 +51,51 @@ else:
             df_nv,
             get_position='[x, y]',
             get_color='[230, 0, 0, 200]',
-            get_radius=12,
+            get_radius=15,
             pickable=True,
-            auto_highlight=True # Ayuda visual al pasar el mouse
+            auto_highlight=True
         )
 
+        # Renderizado básico sin parámetros experimentales
         r = pdk.Deck(
             layers=[layer],
             initial_view_state=view_state,
-            # CAMBIO: Estilo abierto para que no salga en blanco
-            map_style="light", 
-            tooltip={"text": "Establecimiento: {nombre_comercial}"}
+            map_style=None, # Quitar Mapbox para evitar blanco
+            tooltip={"text": "Punto: {nombre_comercial}\nDir: {direccion_completa}"}
         )
 
-        # CAPTURA DE SELECCIÓN
-        # Usamos on_select para detectar el clic
-        map_data = st.pydeck_chart(r, on_select="rerun", selection_mode="single")
-
-        if map_data and map_data.selection and map_data.selection['indices']:
-            selected_index = map_data.selection['indices'][0]
-            st.session_state['pa'] = df_nv.iloc[selected_index].to_dict()
+        st.pydeck_chart(r)
+        st.caption("💡 Si el clic en el mapa no responde, usa el buscador de arriba.")
 
     with col_formulario:
-        if st.session_state['pa']:
+        if 'pa' in st.session_state and st.session_state['pa']:
             pa = st.session_state['pa']
-            st.success(f"📌 Seleccionado: {pa['nombre_comercial']}")
+            st.success(f"📌 Editando: {pa['nombre_comercial']}")
             
-            with st.expander("📝 Formulario de Registro", expanded=True):
-                st.write(f"**Dirección:** {pa['direccion_completa']}")
-                
-                # --- LÓGICA DE BÚSQUEDA ---
-                busq = st.text_input("Buscar en Cámara (Nombre o NIT):", key="search_box")
-                
-                if st.button("Consultar"):
-                    # Buscamos por nombre o nit simultáneamente
-                    res_cc = supabase.table("camara_comercio").select("*") \
-                        .or_(f"nombre_comercial.ilike.%{busq}%,numero_identificacion.eq.{busq}") \
-                        .limit(5).execute()
-                    st.session_state['res_busqueda'] = res_cc.data
+            # --- BÚSQUEDA EN CÁMARA ---
+            busq = st.text_input("Nombre o NIT para vincular:", key="search_box")
+            
+            if st.button("Consultar Cámara"):
+                res_cc = supabase.table("camara_comercio").select("*") \
+                    .or_(f"nombre_comercial.ilike.%{busq}%,numero_identificacion.eq.{busq}") \
+                    .limit(5).execute()
+                st.session_state['res_busqueda'] = res_cc.data
 
-                # Mostrar resultados
-                if 'res_busqueda' in st.session_state:
-                    for r in st.session_state['res_busqueda']:
-                        if st.button(f"Vincular: {r['razon_social']}", key=f"v_{r['numero_identificacion']}"):
-                            # Aquí iría el guardado
+            if 'res_busqueda' in st.session_state:
+                for r in st.session_state['res_busqueda']:
+                    with st.expander(f"🏢 {r['razon_social']}"):
+                        st.write(f"NIT: {r['numero_identificacion']}")
+                        if st.button("Vincular", key=f"v_{r['numero_identificacion']}"):
+                            # Actualización
                             update_data = {
                                 "tipo_documento": r['tipo_identificacion'],
                                 "numero_documento": r['numero_identificacion'],
                                 "razon_social": r['razon_social'],
-                                "tipo_encuesta": "EFECTIVA-DIRECTA",
-                                "fecha_sincronizacion": datetime.now().isoformat()
+                                "tipo_encuesta": "EFECTIVA-DIRECTA"
                             }
                             supabase.table("campo_censo").update(update_data).eq("id_encuesta", pa['id_encuesta']).execute()
-                            st.success("¡Sincronizado!")
+                            st.success("¡Vínculo exitoso!")
                             st.session_state['pa'] = None
                             st.rerun()
         else:
-            st.info("Haga clic en un punto del mapa para ver los detalles.")
+            st.info("Utiliza el buscador o selecciona un punto.")
